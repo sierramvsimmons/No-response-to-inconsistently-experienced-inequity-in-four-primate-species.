@@ -1,0 +1,467 @@
+---
+title: "Responses to Variable Inequitable Rewards in Four Primate Species"
+author: "Sierra"
+date: "2025-02-14"
+output: html_document
+---
+
+## Librarying (and installing) the needed packages
+
+```{r}
+list.of.packages <- c("readxl", "dplyr", "ggplot2", "lme4", "tidyr", "emmeans")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages) #finds packages and if not installed on device will install them
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(tidyr)
+library(emmeans)
+library(car)
+```
+
+## Loading in the data and cleaning it
+
+```{r}
+# Set the path to the directory containing the CSV files
+#Note that all slashed need to be / not \
+directory_path <- "E:/HardDrive/ReseachProjects/LRC/VariableRewardsComparative/Data"
+
+#Loading in the data file
+raw_data <- read_excel("E:/HardDrive/ReseachProjects/LRC/VariableRewardsComparative/Data/AllRawData_Clean_1.xlsx", col_names = TRUE)
+
+#If the column names did not import correctly, so the following code is to correct this
+#head(raw_data)
+#colnames(raw_data) <- raw_data[1, ]
+#raw_data <- raw_data[-1, ]
+
+#Some individuals received more trials than the 20 or 15, so this is to remove those rows from the analysis
+
+raw_data <- raw_data %>%
+  filter(Trial < 21)
+
+raw_data <- raw_data %>%
+  filter(!(Species %in% c("Owl", "Squirrel") & Trial == 16))
+
+#For all conditions except for the inequity conditions, each individual is classified as subject in one session and partner in the other session, but both sessions will be used in the analysis. In the inequity conditions, we need to delete all rows not used in the analysis, which are all the "partner" responses. So we are filtering these out. 
+
+datacheck<- raw_data %>%
+  group_by(Species, DateTested, Subject) %>%
+  summarize(row_count = n())
+datacheck<- raw_data %>%
+  group_by(Species, Condition, ID) %>%
+  summarize(row_count = n())
+
+raw_data$NegRes <- as.numeric(raw_data$NegRes)
+raw_data$ConditionCode <- as.factor(raw_data$ConditionCode)
+
+#I need to compute the proportion of previous trials where the subject received a lower reward than their partner 
+# Changing the data into wide format
+data_wide <- raw_data %>%
+  pivot_wider(
+    id_cols = c('DateTested','Condition','Subject','Trial'),
+    names_from = 'Role',
+    values_from = c('Species','ConditionCode','Session','ID', 'Food','Reward', 'NegRes'),
+    names_prefix = 'Role')
+
+# Giving a 1 value to every trial where the subject recieved a lower reward than the partner
+data_wide$TrialType_subject <- ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'HVR', 0, 
+                              ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'NULL', 0, 
+                                     ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'MVR', 0,
+                                            ifelse(data_wide$Reward_RoleSubject == 'MVR' & data_wide$Reward_RolePartner == 'MVR', 0, 1))))
+# Because we use the "partner" data in the control condition (where they technically act as the subject as well), we have to calculate out all
+#   the values for both the subject and partner 
+data_wide$TrialType_partner <- ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'HVR', 0, 
+                                      ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'NULL', 0, 
+                                             ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'MVR', 0,
+                                                    ifelse(data_wide$Reward_RolePartner == 'MVR' & data_wide$Reward_RoleSubject == 'MVR', 0, 1))))
+
+datacheck<- data_wide %>%
+  group_by(DateTested, Condition, Subject,) %>%
+  summarize(row_count = n())
+
+# Calculate the cumulative sum of TrialType for each group
+data_wide <- data_wide %>%
+  arrange(DateTested, Condition, Subject, Trial)
+
+data_wide <- data_wide %>%
+  group_by(DateTested, Condition, Subject) %>%
+  mutate(CumulativeTrialType_subject = cumsum(TrialType_subject))
+
+data_wide <- data_wide %>%
+  group_by(DateTested, Condition, Subject) %>%
+  mutate(CumulativeTrialType_partner = cumsum(TrialType_partner))
+
+# Deleting 1 from cumulative sum of TrialType, because I only want the number of previous trials where the subject received 
+#   a lower value reward than their partner. Right now the current value includes if the current trial is an inequitable trial 
+data_wide$CumulativeTrialType_subject <- ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'HVR', data_wide$CumulativeTrialType_subject, 
+                              ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'NULL', data_wide$CumulativeTrialType_subject, 
+                                     ifelse(data_wide$Reward_RoleSubject == 'HVR' & data_wide$Reward_RolePartner == 'MVR', data_wide$CumulativeTrialType_subject,
+                                            ifelse(data_wide$Reward_RoleSubject == 'MVR' & data_wide$Reward_RolePartner == 'MVR', data_wide$CumulativeTrialType_subject, data_wide$CumulativeTrialType_subject-1))))
+
+data_wide$PropPrevTrialsIneq_subject = data_wide$CumulativeTrialType_subject/(data_wide$Trial-1)
+
+data_wide$CumulativeTrialType_partner <- ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'HVR', data_wide$CumulativeTrialType_partner, 
+                                        ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'NULL', data_wide$CumulativeTrialType_partner, 
+                                               ifelse(data_wide$Reward_RolePartner == 'HVR' & data_wide$Reward_RoleSubject == 'MVR', data_wide$CumulativeTrialType_partner,
+                                                      ifelse(data_wide$Reward_RolePartner == 'MVR' & data_wide$Reward_RoleSubject == 'MVR', data_wide$CumulativeTrialType_partner, data_wide$CumulativeTrialType_partner-1))))
+data_wide$PropPrevTrialsIneq_partner = data_wide$CumulativeTrialType_partner/(data_wide$Trial-1)
+
+# Adding "TrialType", "CumulativeTrialType", "PropPrevTrialsIneq" to the original file
+subject_only <- subset(raw_data, raw_data$Role == "Subject")
+partner_only <- subset(raw_data, raw_data$Role == "Partner")
+
+# Create a new column 'TrialType' in subject_only
+subject_only$TrialType <- NA
+
+# Identify matching rows in subject_only and data_wide
+matching_rows <- match(paste(subject_only$DateTested, subject_only$Condition, subject_only$Trial),
+                       paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial))
+
+# Assign values to 'TrialType' in subject_only for matching rows
+subject_only$TrialType[!is.na(matching_rows)] <- data_wide$TrialType_subject[matching_rows[!is.na(matching_rows)]]
+
+# Create a new column 'TrialType' in partner_only
+partner_only$TrialType <- NA
+
+# Identify matching rows in partner_only and data_wide
+matching_rows_partner <- match(paste(partner_only$DateTested, partner_only$Condition, partner_only$Trial),
+                               paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial))
+
+# Assign values to 'TrialType' in partner_only for matching rows
+partner_only$TrialType[!is.na(matching_rows_partner)] <- data_wide$TrialType_partner[matching_rows_partner[!is.na(matching_rows_partner)]]
+
+#Adding "CumulativeTrialType"
+subject_only$CumulativeTrialType <- NA
+
+matching_rows_subject <- match(
+  paste(subject_only$DateTested, subject_only$Condition, subject_only$Trial),
+  paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial)
+)
+
+subject_only$CumulativeTrialType[!is.na(matching_rows_subject)] <- 
+  data_wide$CumulativeTrialType_subject[matching_rows_subject[!is.na(matching_rows_subject)]]
+
+partner_only$CumulativeTrialType <- NA
+
+matching_rows_partner <- match(
+  paste(partner_only$DateTested, partner_only$Condition, partner_only$Trial),
+  paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial)
+)
+
+partner_only$CumulativeTrialType[!is.na(matching_rows_partner)] <- 
+  data_wide$CumulativeTrialType_partner[matching_rows_partner[!is.na(matching_rows_partner)]]
+
+#Adding "PropPrevTrialsIneq"
+subject_only$PropPrevTrialsIneq <- NA
+
+matching_rows_subject <- match(
+  paste(subject_only$DateTested, subject_only$Condition, subject_only$Trial),
+  paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial)
+)
+
+subject_only$PropPrevTrialsIneq[!is.na(matching_rows_subject)] <- 
+  data_wide$PropPrevTrialsIneq_subject[matching_rows_subject[!is.na(matching_rows_subject)]]
+
+partner_only$PropPrevTrialsIneq <- NA
+
+matching_rows_partner <- match(
+  paste(partner_only$DateTested, partner_only$Condition, partner_only$Trial),
+  paste(data_wide$DateTested, data_wide$Condition, data_wide$Trial)
+)
+
+partner_only$PropPrevTrialsIneq[!is.na(matching_rows_partner)] <- 
+  data_wide$PropPrevTrialsIneq_partner[matching_rows_partner[!is.na(matching_rows_partner)]]
+
+#Merging subject_only data
+final_data <- rbind(subject_only, partner_only)
+
+final_data$PropPrevTrialsIneq <- ifelse(is.na(final_data$PropPrevTrialsIneq), 0, final_data$PropPrevTrialsIneq)
+
+#Adding the variable previous trial inequitable, previous trial inequitable AND current trial inequitable
+#a new variable needs to be created indicating that the the last trial was an inequity trial:
+# I am copying the data from final_data trial type then moving it down one row
+final_data <- bind_rows(final_data, slice_head(final_data, n=1))
+final_data$PrevTrialsInequity <- final_data$TrialType
+shift <- function(x, n) {
+  c(rep(NA, abs(n)), x[seq(length(x) - abs(n))])
+}
+final_data$PrevTrialsInequity <- shift(final_data$PrevTrialsInequity, -1)
+
+#Deleting the partner data from the inequity trials as these should not be analyzed 
+subject_only <- final_data[!(final_data$Condition %in% c('inequity25', 'inequity50') & final_data$Role == 'Partner'), ]
+
+datacheck<- subject_only %>%
+  group_by(Species, Condition, ID) %>%
+  summarize(row_count = n())
+
+#Checking the number of subjects within each species by condition
+DataCheck <- subject_only %>%
+  group_by(Species, Condition) %>%
+  summarize(unique_subject_count = n_distinct(Subject))
+
+ subject_only$Phase <- ifelse(subject_only$Condition == 'independent25', '25', 
+                          ifelse(subject_only$Condition == 'solo25', '25', 
+                                 ifelse(subject_only$Condition == 'inequity25', '25',
+                                        ifelse(subject_only$Condition == 'yoked25', '25',
+                                               ifelse(subject_only$Condition == 'equity', '2550', '50')))))
+ 
+subject_only$Phase <- as.factor(subject_only$Phase)
+
+#Adding a new variable to count the cumulative number of medium value rewards given out:
+subject_only <- subject_only %>%
+  group_by(DateTested, Condition, ID) %>%
+  mutate(CumulativeMV = cumsum(Reward == "MVR"))
+
+#Adding the variable previous trial inequitable, previous trial inequitable AND current trial inequitable
+#a new variable needs to be created indicating that the the last trial was an inequity trial:
+# I am copying the data from final_data trial type then moving it down one row
+subject_only$PrevTrialMV <- ifelse(subject_only$Reward == "MVR", 1, 0)
+subject_only <- subject_only %>%  
+  mutate(PrevTrialMV = lag(PrevTrialMV, order_by = DateTested))
+
+test <- subject_only %>%
+  filter(Trial < 16)
+
+datacheck <- test %>%
+  group_by(Species, Condition, Subject, Session) %>%
+  summarise(
+    prop_trialtype = mean(Reward == "MVR", na.rm = TRUE),
+    n_trials = n(),
+    .groups = "drop"
+  )
+
+```
+
+### Chimpanzee analysis
+#Note: Do not run this section as a chunk
+
+
+```{r}
+
+Chimps <- subset(subject_only, subject_only$Species == "Chimpanzee")
+
+#Main model: all conditions compared to the equity condition and trial number's influence on negative responses
+FullModel_Chimps <- glmer(NegRes ~ Condition * Trial + (1 | Subject), data = Chimps, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Chimps)
+
+drop1(FullModel_Chimps, test = "Chisq")
+
+FullModel_Chimps <- glmer(NegRes ~ Condition + Trial + (1 | Subject), data = Chimps, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Chimps)
+confint(FullModel_Chimps)
+vif(FullModel_Chimps)
+
+drop1(FullModel_Chimps, test = "Chisq")
+
+FullModel_Chimps <- glmer(NegRes ~ Condition * Trial + (1 + Trial | Subject),
+                           data = Chimps,
+                           family = "binomial",
+                           control = glmerControl(optimizer="bobyqa",
+                                                  optCtrl=list(maxfun=1e7)))
+
+
+#Responses to cumulative MV
+Chimps <- subset(Chimps, Chimps$Reward == "MVR" & Chimps$NegToken == 0)
+Chimps$PrevTrialMV <- as.factor(Chimps$PrevTrialMV)
+
+FullModel_Chimps <- glmer(NegRes ~ CumulativeMV + Condition + PrevTrialMV  + (1 | Subject), data = subset(Chimps, !is.na(Chimps$PrevTrialMV)), family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+
+drop1(FullModel_Chimps, test = "Chisq")
+
+summary(FullModel_Chimps)
+confint(FullModel_Chimps)
+vif(FullModel_Chimps)
+
+```
+ ### Capuchin analysis
+ 
+```{r}
+Capuchins <- subset(subject_only, subject_only$Species == "capuchin")
+
+#Main model: all conditions compared to the equity condition and trial number's influence on negative responses
+FullModel_Capuchins <- glmer(NegRes ~ Condition * Trial + (1 | Subject), data = Capuchins, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Capuchins)
+
+drop1(FullModel_Capuchins, test = "Chisq")
+
+FullModel_Capuchins <- glmer(NegRes ~ Condition + Trial + (1 | Subject), data = Capuchins, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Capuchins)
+confint(FullModel_Capuchins)
+vif(FullModel_Capuchins)
+
+drop1(FullModel_Capuchins, test = "Chisq")
+
+#Responses to cumulative MV
+Capuchins <- subset(Capuchins, Capuchins$Reward == "MVR"& Capuchins$NegToken == 0)
+Capuchins$PrevTrialMV <- as.factor(Capuchins$PrevTrialMV)
+
+FullModel_Capuchins <- glmer(NegRes ~ CumulativeMV * Condition + PrevTrialMV + (1 | Subject), data = subset(Capuchins, !is.na(Capuchins$PrevTrialMV)), family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+
+drop1(FullModel_Capuchins, test = "Chisq")
+
+summary(FullModel_Capuchins)
+confint(FullModel_Capuchins)
+vif(FullModel_Capuchins)
+```
+
+
+```{r}
+Squirrel <- subset(subject_only, subject_only$Species == "Squirrel")
+
+#Main model: all conditions compared to the equity condition and trial number's influence on negative responses
+FullModel_Squirrel <- glmer(NegRes ~ Condition * Trial + (1 | Subject), data = Squirrel, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Squirrel)
+
+drop1(FullModel_Squirrel, test = "Chisq")
+
+FullModel_Squirrel <- glmer(NegRes ~ Condition + Trial + (1 | Subject), data = Squirrel, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Squirrel)
+confint(FullModel_Squirrel)
+vif(FullModel_Squirrel)
+
+drop1(FullModel_Squirrel, test = "Chisq")
+
+#Responses to cumulative MV
+Squirrel <- subset(Squirrel, Squirrel$Reward == "MVR" & Squirrel$NegToken == 0)
+Squirrel$PrevTrialMV <- as.factor(Squirrel$PrevTrialMV)
+
+FullModel_Squirrel <- glmer(NegRes ~ CumulativeMV + Condition + PrevTrialMV + (1 | Subject), data = subset(Squirrel, !is.na(Squirrel$PrevTrialMV)), family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+
+drop1(FullModel_Squirrel, test = "Chisq")
+
+summary(FullModel_Squirrel)
+confint(FullModel_Squirrel, method = "Wald")
+vif(FullModel_Squirrel)
+
+```
+##Analyzing the owl monkey data
+```{r}
+Owl <- subset(subject_only, subject_only$Species == "Owl")
+
+#Main model: all conditions compared to the equity condition and trial number's influence on negative responses
+FullModel_Owl <- glmer(NegRes ~ Condition * Trial + (1 | Subject), data = Owl, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Owl)
+
+drop1(FullModel_Owl, test = "Chisq")
+
+FullModel_Owl <- glmer(NegRes ~ Condition + Trial + (1 | ID), data = Owl, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel_Owl)
+confint(FullModel_Owl)
+vif(FullModel_Owl)
+
+drop1(FullModel_Owl, test = "Chisq")
+
+#Responses to cumulative MV
+Owl <- subset(Owl, Owl$Reward == "MVR" & Owl$NegToken == 0)
+Owl$PrevTrialMV <- as.factor(Owl$PrevTrialMV)
+
+FullModel_Owl <- glmer(NegRes ~ CumulativeMV * Condition + PrevTrialMV + (1 | Subject), data = subset(Owl, !is.na(Owl$PrevTrialMV)), family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1000000000)))
+
+drop1(FullModel_Owl, test = "Chisq")
+
+summary(FullModel_Owl)
+confint(FullModel_Owl, method = "Wald")
+vif(FullModel_Owl)
+```
+
+#Cross-species comparison
+```{r}
+#Main model: all conditions compared to the equity condition and trial number's influence on negative responses
+#Model will say that a column is dropped, and this is correct as it dropped the chimpanzee solo 50 condition, since the chimps never completed this condition. 
+FullModel <- glmer(NegRes ~ Condition * Species + (1 | Subject), data = subject_only, family = "binomial", control =glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=10000000)))
+summary(FullModel)
+vif(FullModel)
+
+drop1(FullModel, test = "Chisq")
+
+library(emmeans)
+
+emm <- emmeans(FullModel, ~ Species | Condition, type = "response")
+# 2. Pairwise contrasts (Tukey-adjusted)
+contrasts <- pairs(emm, adjust = "tukey", type = "link")
+
+# 3. Get confidence intervals
+ci_contrasts <- summary(contrasts, infer = c(TRUE, TRUE)) %>% as.data.frame()
+
+# 4. Convert to a tidy data frame
+ci_df <- as.data.frame(ci_contrasts) %>%
+  select(Condition, contrast, estimate, SE, asymp.LCL, asymp.UCL, z.ratio, p.value) %>%
+  rename(
+    Contrast = contrast,
+    Estimate = estimate,
+    SE = SE,
+    LowerCI = asymp.LCL,
+    UpperCI = asymp.UCL,
+    Z = z.ratio,
+    P = p.value
+  )
+
+# 5. View table
+print(ci_df)
+
+# 6. Optional: save to CSV
+write.csv(ci_df, "Species_Contrasts_with_CI.csv", row.names = FALSE)
+
+```
+
+# Manuscript Figure 
+```{r}
+library(ggplot2)
+
+# Summarize average negative responses by Subject, Species, Condition, and Session
+average <- subject_only %>%
+  group_by(Subject, Species, Condition, Session) %>%
+  summarize(
+    AvgNegRes = mean(NegRes, na.rm = TRUE),
+    SE_NegRes = sd(NegRes, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+G1 <- average
+
+# Add Phase based on Condition codes
+G1$Phase <- ifelse(G1$Condition %in% c('independent25', 'solo25', 'inequity25', 'yoked25'), "25:75", 
+                   ifelse(G1$Condition %in% c('independent50', 'solo50', 'inequity50', 'yoked50'), "50:50", NA))
+
+# Clean up Species names
+G1$Species <- ifelse(G1$Species == 'capuchin', 'Capuchin', 
+                     ifelse(G1$Species == 'Owl', 'Owl Monkey',
+                            ifelse(G1$Species == 'Squirrel', 'Squirrel Monkey', G1$Species)))
+
+# Clean up Condition names
+G1$Condition <- ifelse(G1$Condition %in% c('independent25', 'independent50'), 'Independent',
+                       ifelse(G1$Condition %in% c('solo25', 'solo50'), 'Solo',
+                              ifelse(G1$Condition %in% c('inequity25', 'inequity50'), 'Inequity',
+                                     ifelse(G1$Condition %in% c('yoked25', 'yoked50'), 'Yoked',
+                                            ifelse(G1$Condition == 'equity', 'Equity', G1$Condition)))))
+
+# Convert to factors with specified order
+G1$Condition <- factor(G1$Condition, levels = c("Equity", "Inequity", "Yoked", "Independent", "Solo"))
+G1$Species <- factor(G1$Species, levels = c("Chimpanzee", "Capuchin", "Squirrel Monkey", "Owl Monkey"))
+
+# Create FillGroup for coloring (Equity separate, rest by Phase)
+G1$FillGroup <- ifelse(G1$Condition == "Equity", "Equity", G1$Phase)
+
+# Define colors for fill groups
+fill_colors <- c(
+  "Equity" = "#E69F00",  # orange
+  "25:75" = "#0072B2",   # blue
+  "50:50" = "#CC79A7"    # magenta
+)
+
+# Create the plot
+Figure1 <- ggplot(data = G1, aes(x = Condition, y = AvgNegRes, fill = FillGroup)) +
+  geom_boxplot() +
+  facet_grid(~ Species) +
+  theme_bw() +
+  labs(y = "Average Proportion of Trials Subjects Refused per Session", x = "Condition", fill = "Phase") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 0.5)) +
+  scale_fill_manual(values = fill_colors)
+
+# Save the figure as high resolution PNG
+ggsave("Figure1.png", plot = Figure1, width = 10, height = 6, dpi = 600)
+
+#Added asterisks manually in paint
+```
